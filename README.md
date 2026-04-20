@@ -600,3 +600,105 @@ The following questions cover filesystem concepts beyond the implementation scop
 - **Git Internals** (Pro Git book): https://git-scm.com/book/en/v2/Git-Internals-Plumbing-and-Porcelain
 - **Git from the inside out**: https://codewords.recurse.com/issues/two/git-from-the-inside-out
 - **The Git Parable**: https://tom.preston-werner.com/2009/05/19/the-git-parable.html
+
+---
+
+## Lab Report - PES1UG24CS537
+
+This section is the submission report as required. It includes screenshot placeholders and written answers for Phase 5 and Phase 6.
+
+### Student Details
+
+- SRN: PES1UG24CS537
+- Repository name: PES1UG24CS537-pes-vcs
+- Platform used for final testing: Ubuntu 22.04
+
+### Screenshot Evidence
+
+- 1A: Add screenshot of `./test_objects` output showing all tests passing.
+- 1B: Add screenshot of `find .pes/objects -type f` showing sharded object layout.
+- 2A: Add screenshot of `./test_tree` output showing all tests passing.
+- 2B: Add screenshot of `xxd` dump of a tree object (first 20 lines).
+- 3A: Add screenshot of `./pes init`, `./pes add file1.txt file2.txt`, and `./pes status` output.
+- 3B: Add screenshot of `cat .pes/index` showing index file entries.
+- 4A: Add screenshot of `./pes log` showing at least three commits.
+- 4B: Add screenshot of `find .pes -type f | sort` showing object growth.
+- 4C: Add screenshot of `cat .pes/refs/heads/main` and `cat .pes/HEAD`.
+- Final: Add screenshot of full `make test-integration` run.
+
+### Analysis Answers
+
+#### Q5.1: How `pes checkout <branch>` should work
+
+1. Resolve the target branch ref from `.pes/refs/heads/<branch>` and read the target commit hash.
+2. Read target commit object, then its root tree.
+3. Update `.pes/HEAD` to `ref: refs/heads/<branch>` (or keep detached mode logic separately).
+4. Rewrite working directory to match target tree snapshot:
+   - Create missing files/directories.
+   - Overwrite tracked files that differ.
+   - Remove tracked files/directories that are not present in target tree.
+5. Rewrite `.pes/index` so it matches the checked-out tree state.
+
+Complexity comes from safe working-tree updates, conflict detection with local modifications, directory recursion, file deletions, and atomicity guarantees if checkout fails midway.
+
+#### Q5.2: Dirty working directory conflict detection using index + object store
+
+For each tracked path in index:
+
+1. Compare current filesystem metadata (mtime/size) with index entry.
+2. If metadata differs, hash working file content and compare with index blob hash.
+3. If hash differs, file is dirty.
+
+Then compare the current commit tree path hash vs target branch tree path hash:
+
+1. If file is dirty in working directory.
+2. And file content differs between current tree and target tree.
+3. Refuse checkout for that path because switching would overwrite uncommitted work.
+
+This is equivalent to checking three versions: working tree, current snapshot, target snapshot.
+
+#### Q5.3: Detached HEAD behavior and recovery
+
+In detached HEAD, new commits are created normally, but no branch name moves with them. Only HEAD points to the latest commit hash. Once user switches away, those commits can become unreachable from branch refs.
+
+Recovery options:
+
+1. Immediately create a branch pointing to current detached commit (`refs/heads/<new-branch>`).
+2. If already moved away, recover via reflog-like history (if implemented) or from remembered commit hash.
+3. After creating a branch ref, commits are reachable again and protected from GC.
+
+#### Q6.1: Unreachable object GC algorithm
+
+Mark-and-sweep approach:
+
+1. Initialize a hash-set `reachable`.
+2. Seed traversal from all refs in `.pes/refs/heads/*` and optionally tags.
+3. DFS/BFS commits:
+   - Mark commit object.
+   - Visit parent commit(s).
+   - Visit commit's tree.
+4. DFS/BFS trees:
+   - Mark tree object.
+   - For each entry, mark referenced blob/tree and recurse for subtrees.
+5. Enumerate all files in `.pes/objects/**`.
+6. Delete any object not in `reachable`.
+
+Efficient structure: hash set keyed by 32-byte binary hash (or hex string).
+
+For 100,000 commits and 50 branches, visited commit count is typically near unique commit count (about 100,000, not 5,000,000) because branch histories overlap heavily. Total objects visited is commits plus reachable trees/blobs, usually several times commit count depending on project churn.
+
+#### Q6.2: Why concurrent GC is dangerous
+
+Race example:
+
+1. Commit process writes new blob/tree objects.
+2. Before branch ref is updated to the new commit, those objects are temporarily unreachable from refs.
+3. Concurrent GC scans refs, does not see the new commit path, and deletes those newly written objects.
+4. Commit process then updates ref to point at a commit referencing missing objects, corrupting repository history.
+
+How Git avoids this:
+
+1. Uses object reachability grace periods and reflogs.
+2. Uses packfile and lock protocols to coordinate writers/GC.
+3. Avoids pruning very recent unreachable objects (`gc.pruneExpire` default window).
+4. Uses atomic ref updates and filesystem locks to reduce races.
