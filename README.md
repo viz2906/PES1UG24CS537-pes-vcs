@@ -531,15 +531,68 @@ The following questions cover filesystem concepts beyond the implementation scop
 
 **Q5.1:** A branch in Git is just a file in `.git/refs/heads/` containing a commit hash. Creating a branch is creating a file. Given this, how would you implement `pes checkout <branch>` — what files need to change in `.pes/`, and what must happen to the working directory? What makes this operation complex?
 
+**Answer:**
+1. Read `.pes/refs/heads/<branch>` to get target commit hash.
+2. Read target commit and target root tree from object store.
+3. Update `.pes/HEAD` to `ref: refs/heads/<branch>`.
+4. Update working directory to exactly match target tree:
+   - Create missing files/directories.
+   - Overwrite tracked files that differ.
+   - Remove tracked files missing in target tree.
+5. Rebuild `.pes/index` to match checked-out snapshot.
+
+This is complex because checkout must safely handle recursive directory updates, file deletions, local changes, and partial-failure recovery.
+
 **Q5.2:** When switching branches, the working directory must be updated to match the target branch's tree. If the user has uncommitted changes to a tracked file, and that file differs between branches, checkout must refuse. Describe how you would detect this "dirty working directory" conflict using only the index and the object store.
 
+**Answer:**
+1. For each indexed path, compare current file metadata (`mtime`, `size`) to index.
+2. If metadata differs, hash current file and compare with indexed blob hash.
+3. If hash differs, file is dirty.
+4. Compare current branch tree hash vs target branch tree hash for that path.
+5. If file is both dirty and different between current/target trees, reject checkout to avoid data loss.
+
+This effectively checks working tree vs staged/index snapshot vs target snapshot.
+
 **Q5.3:** "Detached HEAD" means HEAD contains a commit hash directly instead of a branch reference. What happens if you make commits in this state? How could a user recover those commits?
+
+**Answer:**
+In detached HEAD, new commits are created normally but no branch pointer moves. Those commits can become unreachable after switching away.
+
+Recovery:
+1. Create a branch immediately at current detached commit.
+2. If already switched, recover using reflog (or known commit hash), then create a branch.
+3. Once referenced by a branch, commits are reachable again.
 
 ### Garbage Collection and Space Reclamation
 
 **Q6.1:** Over time, the object store accumulates unreachable objects — blobs, trees, or commits that no branch points to (directly or transitively). Describe an algorithm to find and delete these objects. What data structure would you use to track "reachable" hashes efficiently? For a repository with 100,000 commits and 50 branches, estimate how many objects you'd need to visit.
 
+**Answer:**
+Use mark-and-sweep GC.
+
+1. Create a hash set `reachable`.
+2. Start from every ref in `.pes/refs/heads/*`.
+3. Traverse commits (parent links) and mark each commit hash.
+4. For each commit, traverse referenced tree(s).
+5. For each tree, mark entries and recurse into subtrees.
+6. After marking, iterate `.pes/objects/**` and delete objects not in `reachable`.
+
+Best structure: hash set keyed by object hash for O(1) average membership checks.
+
+For 100,000 commits and 50 branches, unique reachable commits are often near 100,000 (not 5,000,000) because histories overlap. Total visited objects are commits + trees + blobs reachable from those commits.
+
 **Q6.2:** Why is it dangerous to run garbage collection concurrently with a commit operation? Describe a race condition where GC could delete an object that a concurrent commit is about to reference. How does Git's real GC avoid this?
+
+**Answer:**
+Race condition:
+1. Commit writer stores new blob/tree objects.
+2. Before ref update, objects are temporarily unreachable from branch refs.
+3. Concurrent GC scans refs and marks without seeing those new objects.
+4. GC prunes them.
+5. Commit then updates ref to a commit pointing to missing objects.
+
+Git mitigates this using lock protocols, atomic ref updates, grace periods for pruning recent unreachable objects, and coordination between maintenance and writers.
 
 ---
 
@@ -615,16 +668,16 @@ This section is the submission report as required. It includes screenshot placeh
 
 ### Screenshot Evidence
 
-- 1A: Add screenshot of `./test_objects` output showing all tests passing.
-- 1B: Add screenshot of `find .pes/objects -type f` showing sharded object layout.
-- 2A: Add screenshot of `./test_tree` output showing all tests passing.
-- 2B: Add screenshot of `xxd` dump of a tree object (first 20 lines).
-- 3A: Add screenshot of `./pes init`, `./pes add file1.txt file2.txt`, and `./pes status` output.
-- 3B: Add screenshot of `cat .pes/index` showing index file entries.
-- 4A: Add screenshot of `./pes log` showing at least three commits.
-- 4B: Add screenshot of `find .pes -type f | sort` showing object growth.
-- 4C: Add screenshot of `cat .pes/refs/heads/main` and `cat .pes/HEAD`.
-- Final: Add screenshot of full `make test-integration` run.
+- 1A and 1B: ![Screenshot 1A and 1B](picsss/1A,1B.png)
+- 2A: ![Screenshot 2A](picsss/2A.png)
+- 2B: ![Screenshot 2B](picsss/2B.png)
+- 3A: ![Screenshot 3A](picsss/3A.png)
+- 3B: ![Screenshot 3B](picsss/3B.png)
+- 4A: ![Screenshot 4A](picsss/4A.png)
+- 4B: ![Screenshot 4B](picsss/4B.png)
+- 4C: ![Screenshot 4C](picsss/4C.png)
+- Final integration run: ![Screenshot Final A](picsss/5A.png)
+- Additional final evidence: ![Screenshot Final B](picsss/5B.png)
 
 ### Analysis Answers
 
